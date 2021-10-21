@@ -51,7 +51,7 @@ func (rest *RestOperations) SyncObjectStatuses() {
 		var IPAddrs []string
 		if vsSvcMetadataObj.Gateway != "" {
 			// gateway based VSes
-			IPAddrs = append(IPAddrs, vsCacheObj.Vip)
+			IPAddrs = rest.GetIPAddrsFromCache(vsCacheObj)
 			allGatewayUpdateOptions = append(allGatewayUpdateOptions,
 				status.UpdateOptions{
 					Vip:             IPAddrs,
@@ -64,7 +64,6 @@ func (rest *RestOperations) SyncObjectStatuses() {
 			if !found {
 				continue
 			}
-
 			parentVsObj, _ := parentVs.(*avicache.AviVsCache)
 			if (vsSvcMetadataObj.IngressName != "" || len(vsSvcMetadataObj.NamespaceIngressName) > 0) && vsSvcMetadataObj.Namespace != "" && parentVsObj != nil {
 				for _, poolKey := range vsCacheObj.PoolKeyCollection {
@@ -78,11 +77,7 @@ func (rest *RestOperations) SyncObjectStatuses() {
 						continue
 					}
 					if poolCacheObj.ServiceMetadataObj.Namespace != "" {
-						if vsCacheObj.Fip != "" {
-							IPAddrs = append(IPAddrs, vsCacheObj.Fip)
-						} else {
-							IPAddrs = []string{parentVsObj.Vip}
-						}
+						IPAddrs = rest.GetIPAddrsFromCache(parentVsObj)
 						allIngressUpdateOptions = append(allIngressUpdateOptions,
 							status.UpdateOptions{
 								Vip:                IPAddrs,
@@ -95,13 +90,8 @@ func (rest *RestOperations) SyncObjectStatuses() {
 			}
 		} else if len(vsSvcMetadataObj.NamespaceServiceName) > 0 {
 			// serviceLB
-			if vsCacheObj.Fip != "" {
-				IPAddrs = append(IPAddrs, vsCacheObj.Fip)
-			} else {
-				IPAddrs = append(IPAddrs, vsCacheObj.Vip)
-			}
+			IPAddrs = rest.GetIPAddrsFromCache(vsCacheObj)
 			allServiceLBUpdateOptions = append(allServiceLBUpdateOptions,
-
 				status.UpdateOptions{
 					Vip:                IPAddrs,
 					ServiceMetadata:    vsSvcMetadataObj,
@@ -115,19 +105,13 @@ func (rest *RestOperations) SyncObjectStatuses() {
 				if !ok {
 					continue
 				}
-
 				poolCacheObj, found := poolCache.(*avicache.AviPoolCache)
 				if !found {
 					continue
 				}
-
 				// insecure pools
 				if poolCacheObj.ServiceMetadataObj.Namespace != "" {
-					if vsCacheObj.Fip != "" {
-						IPAddrs = append(IPAddrs, vsCacheObj.Fip)
-					} else {
-						IPAddrs = []string{vsCacheObj.Vip}
-					}
+					IPAddrs = rest.GetIPAddrsFromCache(vsCacheObj)
 					allIngressUpdateOptions = append(allIngressUpdateOptions,
 						status.UpdateOptions{
 							Vip:                IPAddrs,
