@@ -28,6 +28,7 @@ import (
 
 	avimodels "github.com/vmware/alb-sdk/go/models"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 /*
@@ -1158,6 +1159,7 @@ func (v *AviTLSKeyCertNode) CopyNode() AviModelNode {
 type AviPortHostProtocol struct {
 	PortMap     map[string][]int32
 	Port        int32
+	TargetPort  intstr.IntOrString
 	Protocol    string
 	Hosts       []string
 	Secret      string
@@ -1384,7 +1386,7 @@ type AviPoolNode struct {
 	Tenant                   string
 	CloudConfigCksum         uint32
 	Port                     int32
-	TargetPort               int32
+	TargetPort               intstr.IntOrString
 	PortName                 string
 	Servers                  []AviPoolMetaServer
 	Protocol                 string
