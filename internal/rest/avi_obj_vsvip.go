@@ -551,7 +551,6 @@ func (rest *RestOperations) AviVsVipCacheAdd(rest_op *utils.RestOp, vsKey avicac
 							vsvipFips = append(vsvipFips, fip_addr)
 						}
 					}
-
 					if ipamNetworkSubnet, ipamOk := vip["ipam_network_subnet"].(map[string]interface{}); ipamOk {
 						if networkRef, netRefOk := ipamNetworkSubnet["network_ref"].(string); netRefOk {
 							if networkRefName := strings.Split(networkRef, "#"); len(networkRefName) == 2 {
