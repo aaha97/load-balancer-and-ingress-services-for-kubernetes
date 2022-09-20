@@ -1823,23 +1823,3 @@ func IsValidV6Config(returnErr *error) bool {
 	}
 	return true
 }
-
-func GetIPFamily() string {
-	ipFamily := os.Getenv(IP_FAMILY)
-	if ipFamily != "" {
-		utils.AviLog.Debugf("ipFamily is set to %s", ipFamily)
-		return ipFamily
-	}
-	utils.AviLog.Debugf("ipFamily is not set, default is V4")
-	ipFamily = "V4"
-	return ipFamily
-}
-
-func IsValidIPFamily(returnErr *error) bool {
-	ipFamily := GetIPFamily()
-	if ipFamily == "V4" || ipFamily == "V6" {
-		return true
-	}
-	*returnErr = fmt.Errorf("ipFamily is not one of (V4, V6)")
-	return false
-}
