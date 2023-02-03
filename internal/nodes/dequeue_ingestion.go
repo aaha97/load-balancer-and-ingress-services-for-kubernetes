@@ -700,6 +700,7 @@ func saveAviModel(modelName string, aviGraph *AviObjectGraph, key string) bool {
 	}
 	// Right before saving the model, let's reset the retry counter for the graph.
 	aviGraph.SetRetryCounter()
+	aviGraph.Name = modelName
 	aviGraph.CalculateCheckSum()
 	objects.SharedAviGraphLister().Save(modelName, aviGraph)
 	return true
