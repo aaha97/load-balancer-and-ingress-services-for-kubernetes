@@ -31,7 +31,6 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/api"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/api/models"
 	crd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/clientset/versioned"
-	v1alpha2crd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha2/clientset/versioned"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 	advl4 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/service-apis/client/clientset/versioned"
 
@@ -42,6 +41,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
+	gwV2api "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	svcapi "sigs.k8s.io/service-apis/pkg/client/clientset/versioned"
 
 	"github.com/fsnotify/fsnotify"
@@ -70,6 +70,7 @@ func InitializeAKC() {
 	var err error
 	kubeCluster := false
 	utils.AviLog.Infof("AKO is running with version: %s", version)
+	utils.AviLog.Infof("Gateway mode: %+v", lib.IsGatewayV2())
 
 	// set the logger for k8s as AviLogger.
 	klog.SetLogger(utils.AviLog)
@@ -103,6 +104,7 @@ func InitializeAKC() {
 	var crdClient *crd.Clientset
 	var advl4Client *advl4.Clientset
 	var svcAPIClient *svcapi.Clientset
+	var gwV2Client *gwV2api.Clientset
 
 	if lib.IsWCP() {
 		advl4Client, err = advl4.NewForConfig(cfg)
@@ -124,12 +126,13 @@ func InitializeAKC() {
 			utils.AviLog.Fatalf("Error building AKO CRD clientset: %s", err.Error())
 		}
 		akoControlConfig.SetCRDClientset(crdClient)
-
-		v1alpha2crdClient, err := v1alpha2crd.NewForConfig(cfg)
+	}
+	if lib.IsGatewayV2() {
+		gwV2Client, err = gwV2api.NewForConfig(cfg)
 		if err != nil {
-			utils.AviLog.Fatalf("Error building AKO CRD v1alpha2 clientset: %s", err.Error())
+			utils.AviLog.Fatalf("Error building gateway-api clientset: %s", err.Error())
 		}
-		akoControlConfig.Setv1alpha2CRDClientset(v1alpha2crdClient)
+		akoControlConfig.SetGatewayV2APIClientset(gwV2Client)
 	}
 
 	dynamicClient, err := lib.NewDynamicClientSet(cfg)
@@ -195,6 +198,9 @@ func InitializeAKC() {
 		if lib.UseServicesAPI() {
 			k8s.NewSvcApiInformers(svcAPIClient)
 		}
+	}
+	if lib.IsGatewayV2() {
+		k8s.NewgwV2ApiInformers(gwV2Client)
 	}
 	istioUpdateCh := make(chan struct{})
 

@@ -49,6 +49,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	gwV2api "sigs.k8s.io/gateway-api/apis/v1beta1"
 	servicesapi "sigs.k8s.io/service-apis/apis/v1alpha1"
 )
 
@@ -685,18 +686,6 @@ func (c *AviController) addIndexers() {
 				}
 				return []string{}, nil
 			},
-			lib.L4RuleToServicesIndex: func(obj interface{}) ([]string, error) {
-				service, ok := obj.(*corev1.Service)
-				if !ok {
-					return []string{}, nil
-				}
-				if service.Spec.Type == corev1.ServiceTypeLoadBalancer {
-					if val, ok := service.Annotations[lib.L4RuleAnnotation]; ok && val != "" {
-						return []string{val}, nil
-					}
-				}
-				return []string{}, nil
-			},
 		},
 	)
 
@@ -731,7 +720,21 @@ func (c *AviController) addIndexers() {
 			},
 		)
 	}
+	if lib.IsGatewayV2() {
+		informer := lib.AKOControlConfig().GatewayV2Informers()
+		informer.GatewayInformer.Informer().AddIndexers(
+			cache.Indexers{
+				lib.GatewayClassGatewayIndex: func(obj interface{}) ([]string, error) {
+					gw, ok := obj.(*gwV2api.Gateway)
+					if !ok {
+						return []string{}, nil
+					}
+					return []string{string(gw.Spec.GatewayClassName)}, nil
+				},
+			},
+		)
 
+	}
 	if lib.UseServicesAPI() {
 		informer := lib.AKOControlConfig().SvcAPIInformers()
 		informer.GatewayInformer.Informer().AddIndexers(
@@ -894,6 +897,19 @@ func (c *AviController) FullSyncK8s(sync bool) error {
 			nodes.DequeueIngestion(key, true)
 		}
 	}
+	// Gateway V2
+	if lib.IsGatewayV2() {
+		gwObjs, err := lib.AKOControlConfig().GatewayV2Informers().GatewayInformer.Lister().Gateways(metav1.NamespaceAll).List(labels.Set(nil).AsSelector())
+		if err != nil {
+			utils.AviLog.Errorf("Unable to retrieve the gateway objects during full sync: %s", err)
+			return err
+		}
+		var key string
+		for gw := range gwObjs {
+			key = lib.Gateway + "/" + utils.ObjKey(gw)
+		}
+		nodes.DequeueIngestion(key, true)
+	}
 
 	if lib.GetServiceType() == lib.NodePortLocal {
 		podObjs, err := utils.GetInformers().PodInformer.Lister().Pods(metav1.NamespaceAll).List(labels.Everything())
@@ -918,6 +934,26 @@ func (c *AviController) FullSyncK8s(sync bool) error {
 				objects.SharedResourceVerInstanceLister().Save(key, resVer)
 			}
 			nodes.DequeueIngestion(key, true)
+		}
+	}
+
+	if utils.GetInformers().IngressInformer != nil {
+		for namespace := range acceptedNamespaces {
+			ingObjs, err := utils.GetInformers().IngressInformer.Lister().Ingresses(namespace).List(labels.Set(nil).AsSelector())
+			if err != nil {
+				utils.AviLog.Errorf("Unable to retrieve the ingresses during full sync: %s", err)
+			} else {
+				for _, ingObj := range ingObjs {
+					key := utils.Ingress + "/" + utils.ObjKey(ingObj)
+					meta, err := meta.Accessor(ingObj)
+					if err == nil {
+						resVer := meta.GetResourceVersion()
+						objects.SharedResourceVerInstanceLister().Save(key, resVer)
+					}
+					utils.AviLog.Debugf("Dequeue for ingress key: %v", key)
+					nodes.DequeueIngestion(key, true)
+				}
+			}
 		}
 	}
 
@@ -976,42 +1012,6 @@ func (c *AviController) FullSyncK8s(sync bool) error {
 			}
 		}
 
-		ssoRuleObjs, err := lib.AKOControlConfig().CRDInformers().SSORuleInformer.Lister().SSORules(metav1.NamespaceAll).List(labels.Set(nil).AsSelector())
-		if err != nil {
-			utils.AviLog.Errorf("Unable to retrieve the SsoRules during full sync: %s", err)
-		} else {
-			for _, ssoRuleObj := range ssoRuleObjs {
-				key := lib.SSORule + "/" + utils.ObjKey(ssoRuleObj)
-				meta, err := meta.Accessor(ssoRuleObj)
-				if err == nil {
-					resVer := meta.GetResourceVersion()
-					objects.SharedResourceVerInstanceLister().Save(key, resVer)
-				}
-				if err := c.GetValidator().ValidateSSORuleObj(key, ssoRuleObj); err != nil {
-					utils.AviLog.Warnf("key: %s, Error retrieved during validation of SSORule : %v", key, err)
-				}
-				nodes.DequeueIngestion(key, true)
-			}
-		}
-
-		l4RuleObjs, err := lib.AKOControlConfig().CRDInformers().L4RuleInformer.Lister().List(labels.Set(nil).AsSelector())
-		if err != nil {
-			utils.AviLog.Errorf("Unable to retrieve the L4Rules during full sync: %s", err)
-		} else {
-			for _, l4Rule := range l4RuleObjs {
-				key := lib.L4Rule + "/" + utils.ObjKey(l4Rule)
-				meta, err := meta.Accessor(l4Rule)
-				if err == nil {
-					resVer := meta.GetResourceVersion()
-					objects.SharedResourceVerInstanceLister().Save(key, resVer)
-				}
-				if err := c.GetValidator().ValidateL4RuleObj(key, l4Rule); err != nil {
-					utils.AviLog.Warnf("key: %s, Error retrieved during validation of L4Rule: %v", key, err)
-				}
-				nodes.DequeueIngestion(key, true)
-			}
-		}
-
 		// IngressClass Section
 		if utils.GetInformers().IngressClassInformer != nil {
 			ingClassObjs, err := utils.GetInformers().IngressClassInformer.Lister().List(labels.Set(nil).AsSelector())
@@ -1030,26 +1030,7 @@ func (c *AviController) FullSyncK8s(sync bool) error {
 				}
 			}
 		}
-		//Ingress Section
-		if utils.GetInformers().IngressInformer != nil {
-			for namespace := range acceptedNamespaces {
-				ingObjs, err := utils.GetInformers().IngressInformer.Lister().Ingresses(namespace).List(labels.Set(nil).AsSelector())
-				if err != nil {
-					utils.AviLog.Errorf("Unable to retrieve the ingresses during full sync: %s", err)
-				} else {
-					for _, ingObj := range ingObjs {
-						key := utils.Ingress + "/" + utils.ObjKey(ingObj)
-						meta, err := meta.Accessor(ingObj)
-						if err == nil {
-							resVer := meta.GetResourceVersion()
-							objects.SharedResourceVerInstanceLister().Save(key, resVer)
-						}
-						utils.AviLog.Debugf("Dequeue for ingress key: %v", key)
-						nodes.DequeueIngestion(key, true)
-					}
-				}
-			}
-		}
+
 		//Route Section
 		if utils.GetInformers().RouteInformer != nil {
 			routeObjs, err := utils.GetInformers().RouteInformer.Lister().List(labels.Set(nil).AsSelector())
@@ -1146,27 +1127,8 @@ func (c *AviController) FullSyncK8s(sync bool) error {
 			}
 		}
 	} else {
-		//Ingress Section
-		if utils.GetInformers().IngressInformer != nil {
-			for namespace := range acceptedNamespaces {
-				ingObjs, err := utils.GetInformers().IngressInformer.Lister().Ingresses(namespace).List(labels.Set(nil).AsSelector())
-				if err != nil {
-					utils.AviLog.Errorf("Unable to retrieve the ingresses during full sync: %s", err)
-				} else {
-					for _, ingObj := range ingObjs {
-						key := utils.Ingress + "/" + utils.ObjKey(ingObj)
-						meta, err := meta.Accessor(ingObj)
-						if err == nil {
-							resVer := meta.GetResourceVersion()
-							objects.SharedResourceVerInstanceLister().Save(key, resVer)
-						}
-						utils.AviLog.Debugf("Dequeue for ingress key: %v", key)
-						nodes.DequeueIngestion(key, true)
-					}
-				}
-			}
-		}
 		//Gateway Section
+
 		gatewayObjs, err := lib.AKOControlConfig().AdvL4Informers().GatewayInformer.Lister().Gateways(metav1.NamespaceAll).List(labels.Set(nil).AsSelector())
 		if err != nil {
 			utils.AviLog.Errorf("Unable to retrieve the gateways during full sync: %s", err)

@@ -172,6 +172,20 @@ func isNamespaceUpdated(oldNS, newNS *corev1.Namespace) bool {
 	return false
 }
 
+func AddGatewaysV2FromNSToIngestionQueue(numWorkers uint32, c *AviController, namespace string, msg string) {
+	gwObjs, err := lib.AKOControlConfig().GatewayV2Informers().GatewayInformer.Lister().Gateways(namespace).List(labels.Set(nil).AsSelector())
+	if err != nil {
+		utils.AviLog.Errorf("NS to gateways queue add: Error occurred while retrieving gateways for namespace: %s", namespace)
+		return
+	}
+	for _, gwObj := range gwObjs {
+		key := utils.Gateway + "/" + utils.ObjKey(gwObj)
+		bkt := utils.Bkt(namespace, numWorkers)
+		c.workqueue[bkt].AddRateLimited(key)
+		utils.AviLog.Debugf("key: %s, msg: %s for namespace: %s", key, msg, namespace)
+	}
+}
+
 func AddIngressFromNSToIngestionQueue(numWorkers uint32, c *AviController, namespace string, msg string) {
 	ingObjs, err := utils.GetInformers().IngressInformer.Lister().Ingresses(namespace).List(labels.Set(nil).AsSelector())
 	if err != nil {
@@ -339,6 +353,10 @@ func AddNamespaceEventHandler(numWorkers uint32, c *AviController) cache.Resourc
 						utils.AviLog.Debugf("Adding Gatways for namespaces: %s", nsCur.GetName())
 						AddGatewaysFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
 					}
+					if lib.IsGatewayV2() && lib.AKOControlConfig().GatewayV2Informers() != nil {
+						utils.AviLog.Debugf("Adding Gatways for namespaces: %s", nsCur.GetName())
+						AddGatewaysV2FromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
+					}
 				} else if oldNSAccepted && !newNSAccepted {
 					//Case 2: Old valid namespace updated with invalid labels
 					//Call ingress/route and service delete
@@ -365,6 +383,10 @@ func AddNamespaceEventHandler(numWorkers uint32, c *AviController) cache.Resourc
 					if lib.UseServicesAPI() {
 						utils.AviLog.Debugf("Deleting Gatways for namespaces: %s", nsCur.GetName())
 						AddGatewaysFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterDelete)
+					}
+					if lib.IsGatewayV2() && lib.AKOControlConfig().GatewayV2Informers() != nil {
+						utils.AviLog.Debugf("Adding Gatways for namespaces: %s", nsCur.GetName())
+						AddGatewaysV2FromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterDelete)
 					}
 				}
 			}
@@ -763,7 +785,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 					utils.AviLog.Warnf("calico blockaffinity spec not found: %+v", err)
 					return
 				}
-				key := utils.NodeObj + "/" + specJSON["node"]
+				key := utils.NodeObj + "/" + specJSON["name"]
 				bkt := utils.Bkt(lib.GetTenant(), numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
 			},
@@ -778,7 +800,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 					utils.AviLog.Warnf("calico blockaffinity spec not found: %+v", err)
 					return
 				}
-				key := utils.NodeObj + "/" + specJSON["node"]
+				key := utils.NodeObj + "/" + specJSON["name"]
 				bkt := utils.Bkt(lib.GetTenant(), numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
 			},
@@ -823,46 +845,6 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 		}
 
 		c.dynamicInformers.HostSubnetInformer.Informer().AddEventHandler(hostSubnetHandler)
-	}
-
-	if lib.GetCNIPlugin() == lib.CILIUM_CNI {
-		ciliumNodeHandler := cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
-				utils.AviLog.Debugf("ciliumnode ADD Event")
-				if c.DisableSync {
-					return
-				}
-				crd := obj.(*unstructured.Unstructured)
-				nodename := crd.GetName()
-				key := utils.NodeObj + "/" + nodename
-				bkt := utils.Bkt(lib.GetTenant(), numWorkers)
-				c.workqueue[bkt].AddRateLimited(key)
-			},
-			UpdateFunc: func(oldObj interface{}, newObj interface{}) {
-				utils.AviLog.Debugf("ciliumnode UPDATE Event")
-				if c.DisableSync {
-					return
-				}
-				crd := newObj.(*unstructured.Unstructured)
-				nodename := crd.GetName()
-				key := utils.NodeObj + "/" + nodename
-				bkt := utils.Bkt(lib.GetTenant(), numWorkers)
-				c.workqueue[bkt].AddRateLimited(key)
-			},
-			DeleteFunc: func(obj interface{}) {
-				utils.AviLog.Debugf("ciliumnode DELETE Event")
-				if c.DisableSync {
-					return
-				}
-				crd := obj.(*unstructured.Unstructured)
-				nodename := crd.GetName()
-				key := utils.NodeObj + "/" + nodename
-				bkt := utils.Bkt(lib.GetTenant(), numWorkers)
-				c.workqueue[bkt].AddRateLimited(key)
-			},
-		}
-
-		c.dynamicInformers.CiliumNodeInformer.Informer().AddEventHandler(ciliumNodeHandler)
 	}
 
 	secretEventHandler := cache.ResourceEventHandlerFuncs{
@@ -972,6 +954,9 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 
 	if lib.UseServicesAPI() {
 		c.SetupSvcApiEventHandlers(numWorkers)
+	}
+	if lib.IsGatewayV2() {
+		c.SetupGatewayV2ApiEventHandlers(numWorkers)
 	}
 
 	ingressEventHandler := cache.ResourceEventHandlerFuncs{
@@ -1208,7 +1193,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 		c.informers.RouteInformer.Informer().AddEventHandler(routeEventHandler)
 	}
 
-	// Add CRD handlers HostRule/HTTPRule/AviInfraSettings/SSORule
+	// Add CRD handlers HostRule/HTTPRule/AviInfraSettings
 	c.SetupAKOCRDEventHandlers(numWorkers)
 
 	// Add MultiClusterIngress and ServiceImport CRD event handlers
@@ -1282,10 +1267,6 @@ func (c *AviController) Start(stopCh <-chan struct{}) {
 		go c.dynamicInformers.HostSubnetInformer.Informer().Run(stopCh)
 		informersList = append(informersList, c.dynamicInformers.HostSubnetInformer.Informer().HasSynced)
 	}
-	if lib.GetCNIPlugin() == lib.CILIUM_CNI {
-		go c.dynamicInformers.CiliumNodeInformer.Informer().Run(stopCh)
-		informersList = append(informersList, c.dynamicInformers.CiliumNodeInformer.Informer().HasSynced)
-	}
 
 	if utils.IsVCFCluster() {
 		if c.informers.IngressClassInformer != nil {
@@ -1348,22 +1329,16 @@ func (c *AviController) Start(stopCh <-chan struct{}) {
 			informersList = append(informersList, lib.AKOControlConfig().CRDInformers().HTTPRuleInformer.Informer().HasSynced)
 		}
 
-		if lib.AKOControlConfig().SsoRuleEnabled() {
-			go lib.AKOControlConfig().CRDInformers().SSORuleInformer.Informer().Run(stopCh)
-			informersList = append(informersList, lib.AKOControlConfig().CRDInformers().SSORuleInformer.Informer().HasSynced)
-		}
-
-		if lib.AKOControlConfig().L4RuleEnabled() {
-			go lib.AKOControlConfig().CRDInformers().L4RuleInformer.Informer().Run(stopCh)
-			informersList = append(informersList, lib.AKOControlConfig().CRDInformers().L4RuleInformer.Informer().HasSynced)
-		}
-
 		if utils.IsMultiClusterIngressEnabled() {
 			go c.informers.MultiClusterIngressInformer.Informer().Run(stopCh)
 			informersList = append(informersList, c.informers.MultiClusterIngressInformer.Informer().HasSynced)
 			go c.informers.ServiceImportInformer.Informer().Run(stopCh)
 			informersList = append(informersList, c.informers.ServiceImportInformer.Informer().HasSynced)
 		}
+	}
+	if lib.IsGatewayV2() {
+		go lib.AKOControlConfig().GatewayV2Informers().GatewayInformer.Informer().Run(stopCh)
+		informersList = append(informersList, lib.AKOControlConfig().GatewayV2Informers().GatewayInformer.Informer().HasSynced)
 	}
 
 	if !cache.WaitForCacheSync(stopCh, informersList...) {

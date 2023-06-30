@@ -2004,3 +2004,7 @@ func init() {
 	}
 	SEGroupName = seGroupToUse
 }
+
+func IsGatewayV2() bool {
+	return true
+}

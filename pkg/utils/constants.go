@@ -46,6 +46,7 @@ const (
 	Endpoints                     = "Endpoints"
 	Ingress                       = "Ingress"
 	IngressClass                  = "IngressClass"
+	Gateway                       = "Gateway"
 	OshiftRoute                   = "OshiftRoute"
 	Service                       = "Service"
 	Secret                        = "Secret"

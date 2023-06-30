@@ -144,6 +144,98 @@ func DequeueIngestion(key string, fullsync bool) {
 		}
 	}
 
+	if lib.IsGatewayV2() && objType == lib.Gateway {
+		utils.AviLog.Infof("Processing Gateway %+v", key)
+
+		gatewayObj, err := lib.AKOControlConfig().GatewayV2Informers().GatewayInformer.Lister().Gateways(namespace).Get(name)
+		if err == nil {
+			if len(gatewayObj.Spec.Listeners) == 0 {
+				//TODO move to validation
+				utils.AviLog.Errorf("no listeners found in gateway %+v", key)
+			}
+			var listenerModels []ListenerModel
+			for _, listener := range gatewayObj.Spec.Listeners {
+				l := ListenerModel{
+					Name:     string(listener.Name),
+					Port:     int32(listener.Port),
+					Protocol: string(listener.Protocol),
+					Hostname: (*string)(listener.Hostname),
+				}
+				if listener.TLS != nil {
+					if listener.TLS.Mode == nil || listener.TLS.CertificateRefs == nil {
+						utils.AviLog.Errorf("tls mode/ref not valid %+v", key)
+					}
+					//TODO move to validation
+					l.TLSType = (*string)(listener.TLS.Mode)
+					var certs []string
+					for _, cert := range listener.TLS.CertificateRefs {
+						var certString string
+						/*if cert.Group == nil || cert.Kind == nil || cert.Namespace == nil {
+							//TODO move to validation
+							utils.AviLog.Errorf("error")
+						}*/
+						if cert.Kind != nil && *cert.Kind == "Secret" {
+							certString = string(*cert.Kind)
+						}
+						if cert.Namespace == nil {
+							certString += "/" + namespace
+						} else {
+							certString += "/" + string(*cert.Namespace)
+						}
+						certString += string(cert.Name)
+						certs = append(certs, certString)
+					}
+				} else {
+					l.TLSType = nil
+				}
+				if listener.AllowedRoutes != nil {
+					if listener.AllowedRoutes.Namespaces != nil {
+						if listener.AllowedRoutes.Namespaces.From != nil {
+							from := string(*listener.AllowedRoutes.Namespaces.From)
+							if from == "All" {
+								l.AllowedRoute = "All"
+							} else if from == "Same" {
+								l.AllowedRoute = namespace
+							} else if from == "Selector" {
+								l.AllowedRoute = listener.AllowedRoutes.Namespaces.Selector.String()
+							}
+						}
+					}
+				}
+				listenerModels = append(listenerModels, l)
+			}
+			var address, addressType string
+			if gatewayObj.Spec.Addresses == nil {
+				address = ""
+				addressType = ""
+			}
+			if len(gatewayObj.Spec.Addresses) > 1 {
+				utils.AviLog.Errorf("gateway has more than 1 addresses (%+v), only 1 supported", len(gatewayObj.Spec.Addresses))
+			} else if len(gatewayObj.Spec.Addresses) == 1 {
+				address = gatewayObj.Spec.Addresses[0].Value
+				addressType = string(*gatewayObj.Spec.Addresses[0].Type)
+			}
+			gwModel := GatewayModel{
+				Name:        name,
+				Namespace:   namespace,
+				AddressType: addressType,
+				Address:     address,
+				Listeners:   listenerModels,
+			}
+
+			aviModelGraph := NewAviObjectGraph()
+			aviModelGraph.BuildGatewayV2(gwModel, key)
+			if len(aviModelGraph.GetOrderedNodes()) > 0 {
+				model_name := lib.GetModelName(lib.GetTenant(), aviModelGraph.GetAviEvhVS()[0].Name)
+				ok := saveAviModel(model_name, aviModelGraph, key)
+				if ok && !fullsync {
+					PublishKeyToRestLayer(model_name, key, sharedQueue)
+				}
+			}
+		}
+
+	}
+
 	if routeFound {
 		handleRoute(key, fullsync, routeNames)
 	}
@@ -153,39 +245,6 @@ func DequeueIngestion(key string, fullsync bool) {
 		svcNames, svcFound := schema.GetParentServices(name, namespace, key)
 		if svcFound && utils.CheckIfNamespaceAccepted(namespace) {
 			for _, svcNSNameKey := range svcNames {
-				handleL4Service(utils.L4LBService+"/"+svcNSNameKey, fullsync)
-			}
-		}
-	}
-
-	// L4Rule CRD processing.
-	if objType == lib.L4Rule {
-
-		svcNames, found := schema.GetParentServices(name, namespace, key)
-		if !found {
-			utils.AviLog.Debugf("key: %s, msg: no service found with L4Rule annotation", key)
-			return
-		}
-
-		if !utils.CheckIfNamespaceAccepted(namespace) {
-			utils.AviLog.Debugf("key: %s, msg: namespace of l4rule is not in accepted state", key)
-			return
-		}
-
-		for _, svcNSNameKey := range svcNames {
-			svcName := strings.Split(svcNSNameKey, "/")[1]
-			if lib.HasSharedVIPAnnotation(svcName, namespace) {
-				// L4 Service with shared vip annotation
-				sharedVipKeys, found := ServiceChanges(svcName, namespace, key)
-				utils.AviLog.Debugf("key: %s, msg: shared vip keys got %v", key, sharedVipKeys)
-				if !found || len(sharedVipKeys) == 0 {
-					continue
-				}
-				for _, sharedVipKey := range sharedVipKeys {
-					handleL4SharedVipService(sharedVipKey, key, fullsync)
-				}
-			} else {
-				// L4 Service
 				handleL4Service(utils.L4LBService+"/"+svcNSNameKey, fullsync)
 			}
 		}
@@ -564,7 +623,7 @@ func handleL4SharedVipService(namespacedVipKey, key string, fullsync bool) {
 	// of Type LB. Two Services must not have different AviInfraSetting annotation value.
 	var sharedVipLBIP string
 	var sharedVipInfraSetting string
-	var sharedL4Rule string
+	var appProfile string
 	for i, serviceNSName := range serviceNSNames {
 		svcNSName := strings.Split(serviceNSName, "/")
 		svcObj, err := utils.GetInformers().ServiceInformer.Lister().Services(svcNSName[0]).Get(svcNSName[1])
@@ -586,8 +645,8 @@ func handleL4SharedVipService(namespacedVipKey, key string, fullsync bool) {
 			if infraSettingAnnotation, ok := svcObj.GetAnnotations()[lib.InfraSettingNameAnnotation]; ok && infraSettingAnnotation != "" {
 				sharedVipInfraSetting = infraSettingAnnotation
 			}
-			if l4RuleName, ok := svcObj.GetAnnotations()[lib.L4RuleAnnotation]; ok && l4RuleName != "" {
-				sharedL4Rule = l4RuleName
+			if appProfileAnnotation, ok := svcObj.GetAnnotations()[lib.LBSvcAppProfileAnnotation]; ok && appProfileAnnotation != "" {
+				appProfile = appProfileAnnotation
 			}
 		}
 		if lib.HasSpecLoadBalancerIP(svcObj) {
@@ -610,9 +669,9 @@ func handleL4SharedVipService(namespacedVipKey, key string, fullsync bool) {
 			isShareVipKeyDelete = true
 			break
 		}
-		l4RuleName := svcObj.GetAnnotations()[lib.L4RuleAnnotation]
-		if i != 0 && l4RuleName != sharedL4Rule {
-			utils.AviLog.Errorf("L4Rule annotation value is not consistent with Services grouped using shared-vip annotation. Conflict found for Services [%s: %s %s: %s]", serviceNSName, l4RuleName, serviceNSNames[0], sharedL4Rule)
+		appProfileAnnotation, _ := svcObj.GetAnnotations()[lib.LBSvcAppProfileAnnotation]
+		if i != 0 && appProfileAnnotation != appProfile {
+			utils.AviLog.Errorf("Service application-profile annotation value is not consistent with Services grouped using shared-vip annotation. Conflict found for Services [%s: %s %s: %s]", serviceNSName, infraSettingAnnotation, serviceNSNames[0], sharedVipInfraSetting)
 			isShareVipKeyDelete = true
 			break
 		}
@@ -734,7 +793,7 @@ func handleMultiClusterIngress(key string, fullsync bool, ingressNames []string)
 }
 
 func getIngressNSNameForIngestion(objType, namespace, nsname string) (string, string) {
-	if objType == lib.HostRule || objType == lib.HTTPRule || objType == utils.Secret || objType == lib.SSORule {
+	if objType == lib.HostRule || objType == lib.HTTPRule || objType == utils.Secret {
 		arr := strings.Split(nsname, "/")
 		return arr[0], arr[1]
 	}

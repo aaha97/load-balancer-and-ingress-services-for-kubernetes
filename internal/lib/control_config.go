@@ -15,6 +15,7 @@
 package lib
 
 import (
+	"context"
 	"os"
 	"sort"
 	"strings"
@@ -27,6 +28,8 @@ import (
 
 	istiocrd "istio.io/client-go/pkg/clientset/versioned"
 	istioInformer "istio.io/client-go/pkg/informers/externalversions/networking/v1alpha3"
+	gwV2api "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
+	gwV2Informer "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1beta1"
 	svcapi "sigs.k8s.io/service-apis/pkg/client/clientset/versioned"
 	svcInformer "sigs.k8s.io/service-apis/pkg/client/informers/externalversions/apis/v1alpha1"
 
@@ -34,14 +37,18 @@ import (
 
 	akocrd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/clientset/versioned"
 	akoinformer "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/informers/externalversions/ako/v1alpha1"
-	v1alpha2akocrd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha2/clientset/versioned"
-	v1alpha2akoinformer "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha2/informers/externalversions/ako/v1alpha2"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/github.com/vmware/alb-sdk/go/clients"
 
 	advl4crd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/service-apis/client/clientset/versioned"
 	advl4informer "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/service-apis/client/informers/externalversions/apis/v1alpha1pre1"
 )
+
+type GwV2Informers struct {
+	GatewayInformer      gwV2Informer.GatewayInformer
+	GatewayClassInformer gwV2Informer.GatewayClassInformer
+	HTTPRouteInformer    gwV2Informer.HTTPRouteInformer
+}
 
 type AdvL4Informers struct {
 	GatewayInformer      advl4informer.GatewayInformer
@@ -57,8 +64,6 @@ type AKOCrdInformers struct {
 	HostRuleInformer        akoinformer.HostRuleInformer
 	HTTPRuleInformer        akoinformer.HTTPRuleInformer
 	AviInfraSettingInformer akoinformer.AviInfraSettingInformer
-	SSORuleInformer         v1alpha2akoinformer.SSORuleInformer
-	L4RuleInformer          v1alpha2akoinformer.L4RuleInformer
 }
 
 type IstioCRDInformers struct {
@@ -78,6 +83,11 @@ type BlockedNamespaces struct {
 // TODO (shchauhan): Add other global parameters, which are currently present as independent
 // global variables as part of lib.go
 type akoControlConfig struct {
+
+	// client-set and informer for v1alpha1pre1 services API.
+	gwV2APICS        gwV2api.Interface
+	gwV2APIInformers *GwV2Informers
+
 	// client-set and informer for v1alpha1pre1 services API.
 	advL4Clientset    advl4crd.Interface
 	akoAdvL4Informers *AdvL4Informers
@@ -110,17 +120,6 @@ type akoControlConfig struct {
 	// httpRuleEnabled is set to true if the cluster has
 	// HTTPRule CRD installed.
 	httpRuleEnabled bool
-
-	// client-set and informer for v1alpha2 of AKO CRD.
-	v1alpha2crdClientset v1alpha2akocrd.Interface
-
-	// ssoRuleEnabled is set to true if the cluster has
-	// SSORule CRD installed.
-	ssoRuleEnabled bool
-
-	// l4RuleEnabled is set to true if the cluster has
-	// L4Rule CRD installed.
-	l4RuleEnabled bool
 
 	// licenseType holds the default license tier which would be used by new Clouds. Enum options - ENTERPRISE_16, ENTERPRISE, ENTERPRISE_18, BASIC, ESSENTIALS.
 	licenseType string
@@ -219,6 +218,22 @@ func (c *akoControlConfig) SvcAPIInformers() *ServicesAPIInformers {
 	return c.svcAPIInformers
 }
 
+func (c *akoControlConfig) SetGatewayV2APIClientset(cs gwV2api.Interface) {
+	c.gwV2APICS = cs
+}
+
+func (c *akoControlConfig) GatewayV2Clientset() gwV2api.Interface {
+	return c.gwV2APICS
+}
+
+func (c *akoControlConfig) SetGatewayV2Informers(i *GwV2Informers) {
+	c.gwV2APIInformers = i
+}
+
+func (c *akoControlConfig) GatewayV2Informers() *GwV2Informers {
+	return c.gwV2APIInformers
+}
+
 func (c *akoControlConfig) SetCRDClientset(cs akocrd.Interface) {
 	c.crdClientset = cs
 	c.SetCRDEnabledParams(cs)
@@ -228,26 +243,34 @@ func (c *akoControlConfig) CRDClientset() akocrd.Interface {
 	return c.crdClientset
 }
 
-func (c *akoControlConfig) Setv1alpha2CRDClientset(cs v1alpha2akocrd.Interface) {
-	c.v1alpha2crdClientset = cs
-	c.Setv1alpha2CRDEnabledParams(cs)
-}
-
-func (c *akoControlConfig) V1alpha2CRDClientset() v1alpha2akocrd.Interface {
-	return c.v1alpha2crdClientset
-}
-
-// CRDs are by default installed on all AKO deployments. So always enable CRD parameters.
-// TODO: Optimise
 func (c *akoControlConfig) SetCRDEnabledParams(cs akocrd.Interface) {
-	c.aviInfraSettingEnabled = true
-	c.hostRuleEnabled = true
-	c.httpRuleEnabled = true
-}
+	timeout := int64(120)
+	_, aviInfraError := cs.AkoV1alpha1().AviInfraSettings().List(context.TODO(), metav1.ListOptions{TimeoutSeconds: &timeout})
+	if aviInfraError != nil {
+		utils.AviLog.Infof("ako.vmware.com/v1alpha1/AviInfraSetting not found/enabled on cluster: %v", aviInfraError)
+		c.aviInfraSettingEnabled = false
+	} else {
+		utils.AviLog.Infof("ako.vmware.com/v1alpha1/AviInfraSetting enabled on cluster")
+		c.aviInfraSettingEnabled = true
+	}
 
-func (c *akoControlConfig) Setv1alpha2CRDEnabledParams(cs v1alpha2akocrd.Interface) {
-	c.ssoRuleEnabled = true
-	c.l4RuleEnabled = true
+	_, hostRulesError := cs.AkoV1alpha1().HostRules(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{TimeoutSeconds: &timeout})
+	if hostRulesError != nil {
+		utils.AviLog.Infof("ako.vmware.com/v1alpha1/HostRule not found/enabled on cluster: %v", hostRulesError)
+		c.hostRuleEnabled = false
+	} else {
+		utils.AviLog.Infof("ako.vmware.com/v1alpha1/HostRule enabled on cluster")
+		c.hostRuleEnabled = true
+	}
+
+	_, httpRulesError := cs.AkoV1alpha1().HTTPRules(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{TimeoutSeconds: &timeout})
+	if httpRulesError != nil {
+		utils.AviLog.Infof("ako.vmware.com/v1alpha1/HTTPRule not found/enabled on cluster: %v", httpRulesError)
+		c.httpRuleEnabled = false
+	} else {
+		utils.AviLog.Infof("ako.vmware.com/v1alpha1/HTTPRule enabled on cluster")
+		c.httpRuleEnabled = true
+	}
 }
 
 func (c *akoControlConfig) AviInfraSettingEnabled() bool {
@@ -260,14 +283,6 @@ func (c *akoControlConfig) HostRuleEnabled() bool {
 
 func (c *akoControlConfig) HttpRuleEnabled() bool {
 	return c.httpRuleEnabled
-}
-
-func (c *akoControlConfig) SsoRuleEnabled() bool {
-	return c.ssoRuleEnabled
-}
-
-func (c *akoControlConfig) L4RuleEnabled() bool {
-	return c.l4RuleEnabled
 }
 
 func (c *akoControlConfig) ControllerVersion() string {
