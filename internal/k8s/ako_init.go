@@ -49,6 +49,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	gwV2api "sigs.k8s.io/gateway-api/apis/v1beta1"
 	servicesapi "sigs.k8s.io/service-apis/apis/v1alpha1"
 )
 
@@ -732,6 +733,22 @@ func (c *AviController) addIndexers() {
 		)
 	}
 
+	if lib.IsGatewayV2() {
+		informer := lib.AKOControlConfig().GatewayV2Informers()
+		informer.GatewayInformer.Informer().AddIndexers(
+			cache.Indexers{
+				lib.GatewayClassGatewayIndex: func(obj interface{}) ([]string, error) {
+					gw, ok := obj.(*gwV2api.Gateway)
+					if !ok {
+						return []string{}, nil
+					}
+					return []string{string(gw.Spec.GatewayClassName)}, nil
+				},
+			},
+		)
+
+	}
+
 	if lib.UseServicesAPI() {
 		informer := lib.AKOControlConfig().SvcAPIInformers()
 		informer.GatewayInformer.Informer().AddIndexers(
@@ -893,6 +910,22 @@ func (c *AviController) FullSyncK8s(sync bool) error {
 			}
 			nodes.DequeueIngestion(key, true)
 		}
+	}
+	// Gateway V2
+	if lib.IsGatewayV2() {
+		informer := lib.AKOControlConfig().GatewayV2Informers()
+		informer.GatewayInformer.Informer().AddIndexers(
+			cache.Indexers{
+				lib.GatewayClassGatewayIndex: func(obj interface{}) ([]string, error) {
+					gw, ok := obj.(*gwV2api.Gateway)
+					if !ok {
+						return []string{}, nil
+					}
+					return []string{string(gw.Spec.GatewayClassName)}, nil
+				},
+			},
+		)
+
 	}
 
 	if lib.GetServiceType() == lib.NodePortLocal {

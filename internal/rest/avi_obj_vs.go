@@ -549,7 +549,12 @@ func (rest *RestOperations) StatusUpdateForVS(restMethod utils.RestMethod, vsCac
 			statusOption.ObjType = lib.SERVICES_API
 		}
 		utils.AviLog.Infof("key: %s Publishing to status queue, options: %v", updateOptions.ServiceMetadata.Gateway, utils.Stringify(statusOption))
-		status.PublishToStatusQueue(updateOptions.ServiceMetadata.Gateway, statusOption)
+		// TODO fix status update
+		// skipping status update for gateway
+		if !lib.IsGatewayV2() {
+			status.PublishToStatusQueue(updateOptions.ServiceMetadata.Gateway, statusOption)
+		}
+		//status.PublishToStatusQueue(updateOptions.ServiceMetadata.Gateway, statusOption)
 	case lib.ServiceTypeLBVS:
 		updateOptions := status.UpdateOptions{
 			Vip:                IPAddrs,

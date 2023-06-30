@@ -2004,3 +2004,12 @@ func init() {
 	}
 	SEGroupName = seGroupToUse
 }
+
+func IsGatewayV2() bool {
+	return true
+}
+
+func GetGWParentName(namespace, gwName string) string {
+	//clustername > gateway namespace > Gateway-name
+	return GetNamePrefix() + namespace + "-" + gwName
+}

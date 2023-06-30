@@ -25,6 +25,7 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/status"
 	akov1alpha1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
+	"sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -142,6 +143,33 @@ func DequeueIngestion(key string, fullsync bool) {
 				PublishKeyToRestLayer(model_name, key, sharedQueue)
 			}
 		}
+	}
+
+	if lib.IsGatewayV2() && objType == lib.Gateway {
+		utils.AviLog.Infof("Processing Gateway %+v", key)
+
+		modelName := lib.GetModelName(lib.GetTenant(), lib.GetGWParentName(namespace, name))
+		gatewayObj, err := lib.AKOControlConfig().GatewayV2Informers().GatewayInformer.Lister().Gateways(namespace).Get(name)
+		if err == nil {
+			gwModel := gwGatewayToModel(gatewayObj, name, namespace)
+			aviModelGraph := NewAviObjectGraph()
+			aviModelGraph.BuildGatewayV2(gwModel, key)
+			if len(aviModelGraph.GetOrderedNodes()) > 0 {
+				ok := saveAviModel(modelName, aviModelGraph, key)
+				if ok && !fullsync {
+					PublishKeyToRestLayer(modelName, key, sharedQueue)
+				}
+			}
+		} else {
+			//Delete case
+			if found, _ := objects.SharedAviGraphLister().Get(modelName); found {
+				objects.SharedAviGraphLister().Save(modelName, nil)
+				if !fullsync {
+					PublishKeyToRestLayer(modelName, key, sharedQueue)
+				}
+			}
+		}
+
 	}
 
 	if routeFound {
@@ -963,4 +991,79 @@ func DerivePassthroughVS(hostname string, key string, routeIgrObj RouteIngressMo
 
 	utils.AviLog.Infof("key: %s, msg: Shard Passthrough VSNames: %v %v", key, oldVsName, newVsName)
 	return oldVsName, newVsName
+}
+
+func gwListenerToModel(namespace string, listener v1beta1.Listener) ListenerModel {
+	lModel := ListenerModel{
+		Name:     string(listener.Name),
+		Port:     int32(listener.Port),
+		Protocol: string(listener.Protocol),
+		Hostname: (*string)(listener.Hostname),
+	}
+	if listener.TLS != nil {
+		lModel.TLSType = (*string)(listener.TLS.Mode)
+		var certs []string
+		for _, cert := range listener.TLS.CertificateRefs {
+			var certString string
+			/*if cert.Group == nil || cert.Kind == nil || cert.Namespace == nil {
+				//TODO move to validation
+				utils.AviLog.Errorf("error")
+			}*/
+			if cert.Kind != nil && *cert.Kind == "Secret" {
+				certString = string(*cert.Kind)
+			}
+			if cert.Namespace == nil {
+				certString += "/" + namespace
+			} else {
+				certString += "/" + string(*cert.Namespace)
+			}
+			certString += "/" + string(cert.Name)
+			certs = append(certs, certString)
+		}
+		lModel.CertRefs = certs
+	} else {
+		lModel.TLSType = nil
+	}
+	if listener.AllowedRoutes != nil {
+		if listener.AllowedRoutes.Namespaces != nil {
+			if listener.AllowedRoutes.Namespaces.From != nil {
+				from := string(*listener.AllowedRoutes.Namespaces.From)
+				if from == "All" {
+					lModel.AllowedRoute = "All"
+				} else if from == "Same" {
+					lModel.AllowedRoute = namespace
+				} else if from == "Selector" {
+					lModel.AllowedRoute = listener.AllowedRoutes.Namespaces.Selector.String()
+				}
+			}
+		}
+	}
+	return lModel
+}
+
+func gwGatewayToModel(gatewayObj *v1beta1.Gateway, name, namespace string) GatewayModel {
+	var listenerModels []ListenerModel
+	for _, listener := range gatewayObj.Spec.Listeners {
+		l := gwListenerToModel(namespace, listener)
+		listenerModels = append(listenerModels, l)
+	}
+	var address, addressType string
+	if gatewayObj.Spec.Addresses == nil {
+		address = ""
+		addressType = ""
+	}
+	if len(gatewayObj.Spec.Addresses) > 1 {
+		utils.AviLog.Errorf("gateway has more than 1 addresses (%+v), only 1 supported", len(gatewayObj.Spec.Addresses))
+	} else if len(gatewayObj.Spec.Addresses) == 1 {
+		address = gatewayObj.Spec.Addresses[0].Value
+		addressType = string(*gatewayObj.Spec.Addresses[0].Type)
+	}
+	gwModel := GatewayModel{
+		Name:        name,
+		Namespace:   namespace,
+		AddressType: addressType,
+		Address:     address,
+		Listeners:   listenerModels,
+	}
+	return gwModel
 }
