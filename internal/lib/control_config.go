@@ -27,6 +27,8 @@ import (
 
 	istiocrd "istio.io/client-go/pkg/clientset/versioned"
 	istioInformer "istio.io/client-go/pkg/informers/externalversions/networking/v1alpha3"
+	gwV2api "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
+	gwV2Informer "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1beta1"
 	svcapi "sigs.k8s.io/service-apis/pkg/client/clientset/versioned"
 	svcInformer "sigs.k8s.io/service-apis/pkg/client/informers/externalversions/apis/v1alpha1"
 
@@ -42,6 +44,12 @@ import (
 	advl4crd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/service-apis/client/clientset/versioned"
 	advl4informer "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/service-apis/client/informers/externalversions/apis/v1alpha1pre1"
 )
+
+type GwV2Informers struct {
+	GatewayInformer      gwV2Informer.GatewayInformer
+	GatewayClassInformer gwV2Informer.GatewayClassInformer
+	HTTPRouteInformer    gwV2Informer.HTTPRouteInformer
+}
 
 type AdvL4Informers struct {
 	GatewayInformer      advl4informer.GatewayInformer
@@ -78,6 +86,10 @@ type BlockedNamespaces struct {
 // TODO (shchauhan): Add other global parameters, which are currently present as independent
 // global variables as part of lib.go
 type akoControlConfig struct {
+	// client-set and informer for gateway v2 API.
+	gwV2APICS        gwV2api.Interface
+	gwV2APIInformers *GwV2Informers
+
 	// client-set and informer for v1alpha1pre1 services API.
 	advL4Clientset    advl4crd.Interface
 	akoAdvL4Informers *AdvL4Informers
@@ -217,6 +229,22 @@ func (c *akoControlConfig) SetSvcAPIsInformers(i *ServicesAPIInformers) {
 
 func (c *akoControlConfig) SvcAPIInformers() *ServicesAPIInformers {
 	return c.svcAPIInformers
+}
+
+func (c *akoControlConfig) SetGatewayV2APIClientset(cs gwV2api.Interface) {
+	c.gwV2APICS = cs
+}
+
+func (c *akoControlConfig) GatewayV2Clientset() gwV2api.Interface {
+	return c.gwV2APICS
+}
+
+func (c *akoControlConfig) SetGatewayV2Informers(i *GwV2Informers) {
+	c.gwV2APIInformers = i
+}
+
+func (c *akoControlConfig) GatewayV2Informers() *GwV2Informers {
+	return c.gwV2APIInformers
 }
 
 func (c *akoControlConfig) SetCRDClientset(cs akocrd.Interface) {

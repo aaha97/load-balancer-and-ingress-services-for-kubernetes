@@ -107,7 +107,7 @@ func (rest *RestOperations) DequeueNodes(key string) {
 			return
 		}
 
-		if strings.Contains(name, "-EVH") && lib.IsEvhEnabled() {
+		if (strings.Contains(name, "-EVH") && lib.IsEvhEnabled()) || lib.IsGatewayV2() {
 			if len(avimodel.GetAviEvhVS()) != 1 {
 				utils.AviLog.Warnf("key: %s, msg: virtualservice in the model is not equal to 1:%v", key, avimodel.GetAviEvhVS())
 				return
